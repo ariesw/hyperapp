@@ -138,12 +138,6 @@ export default function (app) {
     return obj
   }
 
-  function defer(fn, data) {
-    setTimeout(function () {
-      fn(data)
-    }, 0)
-  }
-
   function createElementFrom(node, isSVG) {
     if (typeof node === "string") {
       var element = document.createTextNode(node)
@@ -155,7 +149,7 @@ export default function (app) {
 
       for (var name in node.data) {
         if (name === "onCreate") {
-          defer(node.data[name], element)
+          node.data[name](element)
         } else {
           setElementData(element, name, node.data[name])
         }
@@ -172,7 +166,8 @@ export default function (app) {
   function setElementData(element, name, value, oldValue) {
     name = name.toLowerCase()
 
-    if (!value) {
+    if (name === "key") {
+    } else if (!value) {
       element[name] = value
       element.removeAttribute(name)
 
@@ -204,14 +199,14 @@ export default function (app) {
     }
   }
 
-  function updateElementData(element, data, oldData) {
+  function updateElementData(element, oldData, data) {
     for (var name in merge(oldData, data)) {
       var value = data[name]
       var oldValue = oldData[name]
       var realValue = element[name]
 
       if (name === "onUpdate") {
-        defer(value, element)
+        value(element)
 
       } else if (value !== oldValue || realValue !== value) {
         setElementData(element, name, value, oldValue)
@@ -221,30 +216,128 @@ export default function (app) {
 
   function patch(parent, element, oldNode, node) {
     if (oldNode == null) {
-      element = parent.appendChild(createElementFrom(node))
+      element = parent.insertBefore(createElementFrom(node), element)
 
-    } else if (node == null) {
-      batch.push(function () {
-        if (oldNode.data && oldNode.data.onRemove) {
-          oldNode.data.onRemove(element)
-        }
-        parent.removeChild(element)
-      })
     } else if (node.tag && node.tag === oldNode.tag) {
-      updateElementData(element, node.data, oldNode.data)
+      updateElementData(element, oldNode.data, node.data)
 
+      // begin patch children
       var len = node.children.length
       var oldLen = oldNode.children.length
+      var reusableChildren = {}
+      var oldElements = []
+      var newKeys = {}
 
-      for (var i = 0; i < len || i < oldLen; i++) {
-        patch(element, element.childNodes[i], oldNode.children[i], node.children[i])
+
+      for (var i = 0; i < oldLen; i++) {
+        var oldElement = element.childNodes[i]
+        oldElements[i] = oldElement
+
+        var oldChild = oldNode.children[i]
+        var oldKey = getKeyFrom(oldChild)
+
+        if (null != oldKey) {
+          reusableChildren[oldKey] = [oldElement, oldChild]
+        }
       }
 
+      var i = 0
+      var j = 0
+
+      while (j < len) {
+        var oldElement = oldElements[i]
+        var oldChild = oldNode.children[i]
+        var newChild = node.children[j]
+
+        var oldKey = getKeyFrom(oldChild)
+        if (newKeys[oldKey]) {
+          i++
+          continue
+        }
+
+        var newKey = getKeyFrom(newChild)
+
+        var reusableChild = reusableChildren[newKey]
+        var reusableElement = 0
+        var reusableNode = 0
+
+        if (reusableChild) {
+          reusableElement = reusableChild[0]
+          reusableNode = reusableChild[1]
+        }
+
+        if (null == oldKey && null == newKey) {
+          patch(element, oldElement, oldChild, newChild)
+          j++
+          i++
+
+        } else if (null == oldKey && null != newKey) {
+          if (reusableElement) {
+            element.insertBefore(reusableElement, oldElement)
+            patch(element, reusableElement, reusableNode, newChild)
+          } else {
+            patch(element, oldElement, null, newChild)
+          }
+
+          j++
+          newKeys[newKey] = newChild
+
+        } else if (null != oldKey && null == newKey) {
+          i++
+
+        } else {
+          if (oldKey === newKey) {
+            patch(element, reusableElement, reusableNode, newChild)
+            i++
+
+          } else if (reusableElement) {
+            element.insertBefore(reusableElement, oldElement)
+            patch(element, reusableElement, reusableNode, newChild)
+
+          } else {
+            patch(element, oldElement, null, newChild)
+          }
+
+          j++
+          newKeys[newKey] = newChild
+        }
+      }// end while
+
+      while (i < oldLen) {
+        var oldChild = oldNode.children[i]
+        var oldKey = getKeyFrom(oldChild)
+        if (null == oldKey) {
+          batchRemove(element, oldElements[i], oldChild)
+        }
+        i++
+      }
+
+      for (var i in reusableChildren) {
+        var reusableChild = reusableChildren[i]
+        var reusableNode = reusableChild[1]
+        if (!newKeys[reusableNode.data.key]) {
+          batchRemove(element, reusableChild[0], reusableNode)
+        }
+      }
+      // end patch children
     } else if (node !== oldNode) {
       var i = element
       parent.replaceChild(element = createElementFrom(node), i)
     }
 
     return element
+  }
+
+  function getKeyFrom(node) {
+    return node && (node = node.data) ? node.key : node
+  }
+
+  function batchRemove(parent, element, node) {
+    batch.push(function () {
+      if (/*node.data && */node.data.onRemove) {
+        node.data.onRemove(element)
+      }
+      parent.removeChild(element)
+    })
   }
 }
